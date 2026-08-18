@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """命令行日志 + 屏幕悬浮窗字幕 同时运行
-每组：空行 + （用时）日语原文 + （用时）中文译文
+日文识别实时上屏（终端原地刷新），整段翻译完成后输出中文
 """
 import argparse
 import os
@@ -53,8 +53,10 @@ def main():
                 item = result_q.get_nowait()
                 if overlay is None:
                     continue
-                if item[0] == 'block':
-                    overlay.add_block(item[1], item[2])
+                if item[0] == 'pending':
+                    overlay.update_pending(item[1])
+                elif item[0] == 'block':
+                    overlay.complete_pending(item[1], item[2])
         except queue.Empty:
             pass
 
@@ -68,7 +70,7 @@ def main():
         overlay.show()
         t = QTimer()
         t.timeout.connect(update_overlay)
-        t.start(50)   # 50ms 轮询悬浮窗更新队列
+        t.start(20)   # 20ms 轮询悬浮窗更新队列
         # 空定时器保证 Python 字节码周期执行，Ctrl+C 才能投递
         keep = QTimer()
         keep.timeout.connect(lambda: None)
@@ -78,35 +80,32 @@ def main():
     import threading
     out_lock = threading.Lock()
 
-    # 终端输出：每组 = 空行 + 日文 + 中文（组间空行，无流式）
+    # 终端输出：日文实时更新行（\r 原地刷新），整句翻译完成后输出中文
     class Printer:
         def __init__(self):
-            self.pending = []      # 翻译进行中到达的识别行
-            self.busy = False      # 有翻译在进行（识别行需排队）
+            self.live = False      # 当前行是否处于实时更新状态
 
         def recog(self, jp, meta):
             with out_lock:
-                if self.busy:
-                    self.pending.append((jp, meta))
-                    return
-                self.busy = True
-                print('', flush=True)
-                print('（%.2fs）%s' % (meta.get('to_asr', 0.0), jp), flush=True)
+                if not self.live:
+                    print('', flush=True)              # 组前空行
+                print('\r' + jp, end='', flush=True)   # 原地更新识别行
+                self.live = True
 
         def result(self, zh, meta):
             with out_lock:
-                print('（%.2fs）%s' % (meta.get('e2e', 0.0), zh), flush=True)   # 直接跟在日文后，无空行
-                for jp2, m2 in self.pending:
-                    print('', flush=True)                                      # 组间空行
-                    print('（%.2fs）%s' % (m2.get('to_asr', 0.0), jp2), flush=True)
-                self.pending.clear()
-                self.busy = False
+                print('\n（%.2fs）%s' % (meta.get('tr_s', 0.0), zh), flush=True)   # 翻译本身用时
+                self.live = False
 
     printer = Printer()
 
     def on_asr(jp, meta=None):
         meta = meta or {}
         printer.recog(jp, meta)
+        try:
+            result_q.put_nowait(('pending', jp))
+        except queue.Full:
+            pass
 
     def on_result(jp, zh, meta=None):
         meta = meta or {}

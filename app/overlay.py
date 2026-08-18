@@ -18,6 +18,7 @@ class SubtitleOverlay(QWidget):
         super().__init__()
         self.cfg = cfg
         self.blocks = []          # [(jp, zh), ...]，新的在末尾（显示在最下方）
+        self.pending = ''         # 正在识别的日文（实时上屏，整段翻译完成后并入 blocks）
         self._drag_pos = None
         self._fonts = {}
 
@@ -63,8 +64,22 @@ class SubtitleOverlay(QWidget):
         self.update()
         self.resize_to_fit()
 
+    def update_pending(self, jp):
+        """识别实时上屏：更新正在识别的日文行"""
+        if jp != self.pending:
+            self.pending = jp
+            self.update()
+            self.resize_to_fit()
+
+    def complete_pending(self, jp, zh):
+        """整段翻译完成：并入 blocks；若翻译期间新段已开始则保留其剩余部分"""
+        self.add_block(jp, zh)
+        if self.pending.startswith(jp):
+            self.pending = self.pending[len(jp):]
+
     def clear(self):
         self.blocks.clear()
+        self.pending = ''
         self.update()
 
     # ---------- 排版与绘制 ----------
@@ -87,6 +102,13 @@ class SubtitleOverlay(QWidget):
             for ln in self.wrap_lines(zh, 'zh', zh_size, w):
                 rows.append((y, ln, 'zh', zh_size))
                 y += zh_h
+        # 实时识别行（未翻译的日文，显示在最下方）
+        if self.pending:
+            jp_f = self.font_for('jp', jp_size)
+            jp_h = QFontMetrics(jp_f).height()
+            for ln in self.wrap_lines(self.pending, 'jp', jp_size, w):
+                rows.append((y, ln, 'jp', jp_size))
+                y += jp_h
         # 最后一行高度去掉 leading（字形底部即行底，不留额外空隙）
         if rows:
             lf = self.font_for(rows[-1][2], rows[-1][3])

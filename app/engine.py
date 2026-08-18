@@ -292,7 +292,7 @@ class LiveEngine(threading.Thread):
         vad_model = load_silero_vad(onnx=True)
         vad = VADIterator(vad_model, threshold=0.5, sampling_rate=SAMPLE_RATE,
                           min_silence_duration_ms=int(self.cfg['min_silence_ms']),
-                          speech_pad_ms=0)   # 静音检测ms/阈值来自配置
+                          speech_pad_ms=0)   # 静音检测ms/阈值来自配置（纯静音喂段）
         buf = []          # 当前语音段累积（16k 单声道）
         seg_start = None  # buf 中语音段起点索引
         pending = []      # 重采样后等待凑满 512 帧的样本
@@ -335,13 +335,14 @@ class LiveEngine(threading.Thread):
             t0 = time.monotonic()
             text = self._transcribe(seg)
             asr_s = time.monotonic() - t0
-            if text:
-                if self.on_asr:
-                    self.on_asr(text, {'to_asr': VAD_CONFIRM + asr_s})
-                try:
-                    self.tr_q.put_nowait((text, asr_s))
-                except queue.Full:
-                    pass
+            if not text:
+                continue
+            if self.on_asr:
+                self.on_asr(text, {'to_asr': VAD_CONFIRM + asr_s})   # 识别实时上屏（引擎切的段为单位）
+            try:
+                self.tr_q.put_nowait((text, asr_s))   # 整段立即翻译
+            except queue.Full:
+                pass
 
     def _translate_loop(self):
         while not self._stop_event.is_set():
@@ -352,9 +353,7 @@ class LiveEngine(threading.Thread):
             t0 = time.monotonic()
             zh = self.translate(jp)
             tr_s = time.monotonic() - t0
-            to_asr = VAD_CONFIRM + asr_s          # 说完→识别
-            e2e = to_asr + tr_s                   # 说完→译文
-            self.on_result(jp, zh, {'to_asr': to_asr, 'e2e': e2e})
+            self.on_result(jp, zh, {'to_asr': VAD_CONFIRM + asr_s, 'tr_s': tr_s})   # tr_s=翻译本身用时
 
     # ============ 清理 ============
     def _cleanup(self):
