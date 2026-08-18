@@ -244,8 +244,8 @@ class SubtitleOverlay(QWidget):
         wa.setDefaultWidget(cb)
         sub.addAction(wa)
 
-    def _double_submenu(self, menu, title, key, lo, hi, step):
-        """小数数值项：右侧展开子菜单，内嵌 QDoubleSpinBox"""
+    def _double_submenu(self, menu, title, key, lo, hi, step, invert=False):
+        """小数数值项：右侧展开子菜单，内嵌 QDoubleSpinBox；invert 时界面值 = 1 - 存储值"""
         from PySide6.QtWidgets import QWidgetAction, QDoubleSpinBox
         sub = menu.addMenu(title)
         wa = QWidgetAction(sub)
@@ -253,9 +253,12 @@ class SubtitleOverlay(QWidget):
         sb.setRange(lo, hi)
         sb.setSingleStep(step)
         sb.setDecimals(2)
-        sb.setValue(float(self.cfg[key]))
+        sb.setValue(1.0 - float(self.cfg[key]) if invert else float(self.cfg[key]))
         sb.setFixedWidth(self._spin_width_for(999))   # 三位数字宽度（0.50 完整显示）
-        sb.valueChanged.connect(lambda v: self.set_cfg(key, v))
+        if invert:
+            sb.valueChanged.connect(lambda v: self.set_cfg(key, round(1.0 - v, 2)))
+        else:
+            sb.valueChanged.connect(lambda v: self.set_cfg(key, v))
         wa.setDefaultWidget(sb)
         sub.addAction(wa)
 
@@ -333,8 +336,8 @@ class SubtitleOverlay(QWidget):
         a.triggered.connect(self.toggle_click_through)
         m.addSeparator()
         sub = m.addMenu('其他设置')
-        self._num_submenu(sub, '静音检测（ms）', 'min_silence_ms', 100, 999, 100)
-        self._double_submenu(sub, '语音判定阈值', 'no_speech_threshold', 0.00, 1.00, 0.05)
+        self._num_submenu(sub, '静音检测（ms）', 'min_silence_ms', 0, 999, 20)
+        self._double_submenu(sub, '语音判定阈值', 'no_speech_threshold', 0.00, 1.00, 0.05, invert=True)   # 界面 1-阈值：0=不判定（最松），1=最严
         a = sub.addAction('更改后重启生效')
         m.addSeparator()
         a = m.addAction('清空字幕')
