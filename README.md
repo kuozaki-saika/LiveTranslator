@@ -10,6 +10,8 @@
 
 ## 安装
 
+克隆仓库
+
 两条命令分开执行。先创建环境并安装依赖（首次约 5-10 分钟）：
 
 ~~~powershell
@@ -25,8 +27,8 @@ powershell -ExecutionPolicy Bypass -File scripts\download_assets.ps1
 ## 使用
 
 - 双击 scripts\cli.bat：监听系统声音，实时输出日语识别 + 中文翻译（终端日志 + 屏幕悬浮窗）
-- 托盘图标右键：显示/关闭字幕、切换点击穿透、退出
-- 悬浮窗右键菜单：条数/字号/宽度/颜色/描边/边框/穿透/其他设置
+- 托盘图标右键：显示/关闭字幕、穿透、退出
+- 悬浮窗右键菜单：大多数设置
 - 测试模式：powershell -ExecutionPolicy Bypass -File scripts\run.ps1 --file 某音频.wav
 
 ## 技术栈
@@ -37,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File scripts\download_assets.ps1
 | VAD | Silero VAD（阈值 0.5/静音 100ms/无补尾） |
 | 日语识别 | kotoba-whisper-v2.0-faster（CTranslate2 int8, CUDA） |
 | 日译中 | Sakura GalTransl-v4-4B-2601 Q6K（llama.cpp 本地服务） |
-| 显示 | 终端日志 + PySide6 无背景悬浮窗（思源宋体 SC/JP） |
+| 显示 | 终端日志 + PySide6 悬浮窗（思源宋体 SC/JP） |
 
 ## 许可证
 
