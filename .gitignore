@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# 运行时生成
+config.json
+llama-server.log
+llama.zip
+
+# 模型（太大，不入库，由 download_assets.ps1 下载）
+models/
+
+# llama.cpp 二进制（由脚本下载）
+llama/
+
+# 打包产物
+dist/
+build/
+*.spec
+
+# 测试
+sample_*.wav
+sample_*.png
+# 字体（由 download_assets.ps1 下载）
+assets/fonts/
