@@ -8,14 +8,11 @@ SYSTEM_PROMPT = ('你是一个视觉小说翻译模型，可以通顺地使用�
                  '不要擅自添加原文中没有的特殊符号，也不要擅自增加或减少换行。')
 
 SAMPLE_RATE = 16000
-VAD_FRAME = 512          # 32ms @16k
-VAD_CONFIRM = 0.10       # 静音确认100ms（无补尾，说完→提交，秒）
-PRE_ROLL = 0.8           # 语音开始前保留的音频（秒）
-MIN_SEGMENT = 0.6         # 语音段最短长度（秒，过短多为噪声丢弃）
+MAX_BUF_S = 30           # 识别缓冲上限（秒，whisper 单次窗口上限）
 
 
 class LiveEngine(threading.Thread):
-    '''系统音频 → VAD → faster-whisper(kotoba) → Sakura 翻译 → 回调。'''
+    '''系统音频 → faster-whisper(kotoba) 滚动识别（模型时间戳切分） → Sakura 翻译 → 回调。'''
 
     def __init__(self, cfg: Config, on_result, on_status=None, capture=True, on_asr=None):
         super().__init__(daemon=True)
@@ -25,8 +22,7 @@ class LiveEngine(threading.Thread):
         self.on_asr = on_asr
         self.capture = capture
         self._stop_event = threading.Event()
-        self.audio_q = queue.Queue(maxsize=64)     # 原始音频块
-        self.asr_q = queue.Queue(maxsize=8)        # 语音段
+        self.audio_q = queue.Queue(maxsize=512)    # 原始音频块（大容量：识别期间不丢音频）
         self.tr_q = queue.Queue(maxsize=8)         # 待翻译文本
         self.llm_proc = None
         self.asr_model = None
@@ -44,7 +40,6 @@ class LiveEngine(threading.Thread):
         t_llm.join()
         t_asr.join()
         threads = [
-            threading.Thread(target=self._vad_loop, daemon=True),
             threading.Thread(target=self._asr_loop, daemon=True),
             threading.Thread(target=self._translate_loop, daemon=True),
         ]
@@ -211,19 +206,16 @@ class LiveEngine(threading.Thread):
     FORCE_FILTER = {'ごめん'}
 
     def _transcribe(self, audio):
+        """识别整缓冲，返回带时间戳的片段列表（None=模型未就绪/失败）"""
         if self.asr_model is None:
             return None
         try:
-            segments, info = self.asr_model.transcribe(
+            segments, _ = self.asr_model.transcribe(
                 audio, language='ja', beam_size=1, temperature=0.0,
-                condition_on_previous_text=False, without_timestamps=True,
-                vad_filter=False, no_speech_threshold=float(self.cfg['no_speech_threshold']))
-            text = ''.join(s.text for s in segments).strip()
-            if not text:
-                return None
-            if text in self.FORCE_FILTER:
-                return None          # 强制删除"ごめん"
-            return text
+                condition_on_previous_text=False, without_timestamps=False,
+                vad_filter=True,   # 跳过静音：缓冲内含静音段时避免幻觉
+                no_speech_threshold=float(self.cfg['no_speech_threshold']))
+            return [s for s in segments if s.text.strip()]
         except Exception as e:
             self.on_status('ASR 错误: %s' % type(e).__name__)
             return None
@@ -286,63 +278,62 @@ class LiveEngine(threading.Thread):
             t_new = np.linspace(0, len(a) - 1, n_out)
             a = np.interp(t_new, t_old, a).astype(np.float32)
         return a
-    # ============ VAD 分段 ============
-    def _vad_loop(self):
-        from silero_vad import load_silero_vad, VADIterator
-        vad_model = load_silero_vad(onnx=True)
-        vad = VADIterator(vad_model, threshold=0.5, sampling_rate=SAMPLE_RATE,
-                          min_silence_duration_ms=int(self.cfg['min_silence_ms']),
-                          speech_pad_ms=0)   # 静音检测ms/阈值来自配置（纯静音喂段）
-        buf = []          # 当前语音段累积（16k 单声道）
-        seg_start = None  # buf 中语音段起点索引
-        pending = []      # 重采样后等待凑满 512 帧的样本
-        while not self._stop_event.is_set():
-            try:
-                item = self.audio_q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            a = self._to_16k_mono(*item)
-            if len(a) == 0:
-                continue
-            pending.extend(a.tolist())
-            while len(pending) >= VAD_FRAME:
-                frame = np.array(pending[:VAD_FRAME], dtype=np.float32)
-                pending = pending[VAD_FRAME:]
-                r = vad(frame)
-                buf.extend(frame.tolist())
-                if r:
-                    if 'start' in r and seg_start is None:
-                        seg_start = max(0, len(buf) - VAD_FRAME - int(PRE_ROLL * SAMPLE_RATE))
-                    if 'end' in r and seg_start is not None:
-                        seg = np.array(buf[seg_start:], dtype=np.float32)
-                        seg_start = None
-                        buf = []
-                        if len(seg) > MIN_SEGMENT * SAMPLE_RATE:
-                            try:
-                                self.asr_q.put_nowait(seg)
-                            except queue.Full:
-                                pass
-                if seg_start is None and len(buf) > PRE_ROLL * SAMPLE_RATE:
-                    buf = buf[-int(PRE_ROLL * SAMPLE_RATE):]
-
-    # ============ 识别与翻译循环 ============
+    # ============ 滚动识别（模型时间戳切分，无 VAD） ============
     def _asr_loop(self):
+        buf = np.zeros(0, dtype=np.float32)   # 16k 单声道缓冲（≤30s）
+        margin = float(self.cfg['min_silence_ms']) / 1000.0   # 句末确认：说完后再等这么久确认结束
+        need = True                           # 有新音频或切过段 → 立即识别
+        last_tail = ''                       # 上次上屏的未完成文本（同句不重复上）
         while not self._stop_event.is_set():
+            got = False
             try:
-                seg = self.asr_q.get(timeout=0.5)
+                while True:   # 先排空音频队列（WASAPI 每块仅几 ms，必须一次性全收）
+                    item = self.audio_q.get_nowait()
+                    a = self._to_16k_mono(*item)
+                    if len(a):
+                        buf = np.concatenate([buf, a])
+                        if len(buf) > MAX_BUF_S * SAMPLE_RATE:
+                            buf = buf[-MAX_BUF_S * SAMPLE_RATE:]   # 超限丢最旧
+                        got = True
             except queue.Empty:
-                continue
-            t0 = time.monotonic()
-            text = self._transcribe(seg)
-            asr_s = time.monotonic() - t0
-            if not text:
-                continue
-            if self.on_asr:
-                self.on_asr(text, {'to_asr': VAD_CONFIRM + asr_s})   # 识别实时上屏（引擎切的段为单位）
-            try:
-                self.tr_q.put_nowait((text, asr_s))   # 整段立即翻译
-            except queue.Full:
                 pass
+            if got:
+                need = True
+            if not need or len(buf) == 0:
+                time.sleep(0.05)   # 无新音频：歇 50ms 再查
+                continue
+            need = False
+            t0 = time.monotonic()
+            segs = self._transcribe(buf)
+            asr_s = time.monotonic() - t0
+            if not segs:
+                continue
+            buf_s = len(buf) / SAMPLE_RATE
+            cut_s = 0.0
+            for s in segs:
+                if s.end < buf_s - margin:
+                    cut_s = max(cut_s, s.end)   # 最晚的完成句结束点
+            # 完成句：日文立即上屏（final，不等翻译），随后进翻译队列
+            if cut_s > 0:
+                for s in segs:
+                    if s.end <= cut_s:
+                        text = s.text.strip()
+                        if not text or text in self.FORCE_FILTER:
+                            continue          # 强制删除"ごめん"
+                        if self.on_asr:
+                            self.on_asr(text, {'to_asr': asr_s, 'final': True})
+                        try:
+                            self.tr_q.put_nowait((text, asr_s))   # 整段立即翻译
+                        except queue.Full:
+                            pass
+                buf = buf[int(cut_s * SAMPLE_RATE):]
+                need = True   # 切完立即再识别剩余部分
+            # 未完成部分（尾部）替换式实时上屏
+            tail = ''.join(s.text for s in segs if s.end > cut_s).strip()
+            if tail != last_tail or (cut_s > 0 and last_tail and not tail):
+                last_tail = tail
+                if self.on_asr:
+                    self.on_asr(tail, {'to_asr': asr_s})   # 识别实时上屏
 
     def _translate_loop(self):
         while not self._stop_event.is_set():
@@ -353,7 +344,7 @@ class LiveEngine(threading.Thread):
             t0 = time.monotonic()
             zh = self.translate(jp)
             tr_s = time.monotonic() - t0
-            self.on_result(jp, zh, {'to_asr': VAD_CONFIRM + asr_s, 'tr_s': tr_s})   # tr_s=翻译本身用时
+            self.on_result(jp, zh, {'to_asr': asr_s, 'tr_s': tr_s})   # tr_s=翻译本身用时
 
     # ============ 清理 ============
     def _cleanup(self):

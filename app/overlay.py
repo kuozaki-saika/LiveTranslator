@@ -18,7 +18,9 @@ class SubtitleOverlay(QWidget):
         super().__init__()
         self.cfg = cfg
         self.blocks = []          # [(jp, zh), ...]，新的在末尾（显示在最下方）
-        self.pending = ''         # 正在识别的日文（实时上屏，整段翻译完成后并入 blocks）
+        self.pending = ''         # 正在识别的日文（实时上屏；完成后定格，等翻译整块上屏）
+        self._held = False        # 完成句是否在等待翻译（期间新识别文本暂存）
+        self._stash = ''         # 等待翻译期间到达的新识别文本
         self._drag_pos = None
         self._fonts = {}
 
@@ -65,21 +67,39 @@ class SubtitleOverlay(QWidget):
         self.resize_to_fit()
 
     def update_pending(self, jp):
-        """识别实时上屏：更新正在识别的日文行"""
+        """识别实时上屏：更新正在识别的日文行；等待翻译期间新文本暂存"""
+        if self._held:
+            self._stash = jp
+            return
         if jp != self.pending:
             self.pending = jp
             self.update()
             self.resize_to_fit()
 
+    def finalize_pending(self, jp):
+        """句子完成：实时行定格此句，等翻译到达后整块（日文+译文）上屏"""
+        self._held = True
+        if jp and jp != self.pending:
+            self.pending = jp
+            self.update()
+            self.resize_to_fit()
+
     def complete_pending(self, jp, zh):
-        """整段翻译完成：并入 blocks；若翻译期间新段已开始则保留其剩余部分"""
+        """翻译完成：整块上屏，实时行切换到暂存的新文本"""
         self.add_block(jp, zh)
-        if self.pending.startswith(jp):
-            self.pending = self.pending[len(jp):]
+        self._held = False
+        nxt = self._stash
+        self._stash = ''
+        if nxt != self.pending:
+            self.pending = nxt
+            self.update()
+            self.resize_to_fit()
 
     def clear(self):
         self.blocks.clear()
         self.pending = ''
+        self._held = False
+        self._stash = ''
         self.update()
 
     # ---------- 排版与绘制 ----------
@@ -99,9 +119,10 @@ class SubtitleOverlay(QWidget):
             for ln in self.wrap_lines(jp, 'jp', jp_size, w):
                 rows.append((y, ln, 'jp', jp_size))
                 y += jp_h
-            for ln in self.wrap_lines(zh, 'zh', zh_size, w):
-                rows.append((y, ln, 'zh', zh_size))
-                y += zh_h
+            if zh:   # 未译块只有日文行
+                for ln in self.wrap_lines(zh, 'zh', zh_size, w):
+                    rows.append((y, ln, 'zh', zh_size))
+                    y += zh_h
         # 实时识别行（未翻译的日文，显示在最下方）
         if self.pending:
             jp_f = self.font_for('jp', jp_size)
@@ -358,9 +379,9 @@ class SubtitleOverlay(QWidget):
         a.triggered.connect(self.toggle_click_through)
         m.addSeparator()
         sub = m.addMenu('其他设置')
-        self._num_submenu(sub, '静音检测（ms）', 'min_silence_ms', 1, 999, 20)   # 下限1ms：0会导致VAD不切段不出字
+        self._num_submenu(sub, '句末确认（ms）', 'min_silence_ms', 0, 999, 20)   # 说完后再等这么多确认结束
         self._double_submenu(sub, '语音判定阈值', 'no_speech_threshold', 0.00, 1.00, 0.05, invert=True)   # 界面 1-阈值：0=不判定（最松），1=最严
-        a = sub.addAction('更改后重启生效')
+        a = sub.addAction('（更改后重启生效）')
         m.addSeparator()
         a = m.addAction('清空字幕')
         a.triggered.connect(self.clear)

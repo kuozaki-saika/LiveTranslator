@@ -4,7 +4,6 @@
 """
 import argparse
 import os
-import queue
 import signal
 import sys
 import time
@@ -44,33 +43,28 @@ def main():
 
     # ---------- Qt 悬浮窗（与命令行日志并行） ----------
     overlay = None
+    bridge = None
     app = None
-    result_q = queue.Queue()
-
-    def update_overlay():
-        try:
-            while True:
-                item = result_q.get_nowait()
-                if overlay is None:
-                    continue
-                if item[0] == 'pending':
-                    overlay.update_pending(item[1])
-                elif item[0] == 'block':
-                    overlay.complete_pending(item[1], item[2])
-        except queue.Empty:
-            pass
 
     if not args.file and not args.no_overlay:
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import QObject, Signal, QTimer
         from overlay import SubtitleOverlay
+
+        # 跨线程桥：引擎回调线程 emit 信号 → Qt 自动排队到 GUI 线程执行（免轮询）
+        class OverlayBridge(QObject):
+            pending = Signal(str)
+            final = Signal(str)
+            block = Signal(str, str)
+
         app = QApplication(sys.argv)
         app.setApplicationName('LiveTranslator')
         overlay = SubtitleOverlay(cfg)
         overlay.show()
-        t = QTimer()
-        t.timeout.connect(update_overlay)
-        t.start(20)   # 20ms 轮询悬浮窗更新队列
+        bridge = OverlayBridge()
+        bridge.pending.connect(overlay.update_pending)
+        bridge.final.connect(overlay.finalize_pending)
+        bridge.block.connect(overlay.complete_pending)
         # 空定时器保证 Python 字节码周期执行，Ctrl+C 才能投递
         keep = QTimer()
         keep.timeout.connect(lambda: None)
@@ -92,28 +86,34 @@ def main():
                 print('\r' + jp, end='', flush=True)   # 原地更新识别行
                 self.live = True
 
+        def final(self, jp):
+            with out_lock:
+                print('', flush=True)                  # 结束实时行
+                if not self.live:
+                    print(jp, flush=True)              # 之前没显示过：补打
+                self.live = False
+
         def result(self, zh, meta):
             with out_lock:
-                print('\n（%.2fs）%s' % (meta.get('tr_s', 0.0), zh), flush=True)   # 翻译本身用时
-                self.live = False
+                print('（%.2fs）%s' % (meta.get('tr_s', 0.0), zh), flush=True)   # 翻译本身用时
 
     printer = Printer()
 
     def on_asr(jp, meta=None):
         meta = meta or {}
-        printer.recog(jp, meta)
-        try:
-            result_q.put_nowait(('pending', jp))
-        except queue.Full:
-            pass
+        if meta.get('final'):
+            if jp:
+                printer.final(jp)     # 完成句：定格当前行
+        elif jp:
+            printer.recog(jp, meta)   # 尾部：实时更新
+        if bridge is not None:
+            (bridge.final if meta.get('final') else bridge.pending).emit(jp)
 
     def on_result(jp, zh, meta=None):
         meta = meta or {}
         printer.result(zh, meta)
-        try:
-            result_q.put_nowait(('block', jp, zh))
-        except queue.Full:
-            pass
+        if bridge is not None:
+            bridge.block.emit(jp, zh)
 
     def on_status(s):
         print('[状态] ' + s, flush=True)
@@ -135,7 +135,7 @@ def main():
             eng.audio_q.put((audio[i:i + 16000], 16000, 1))
         idle = 0
         while idle < 12:   # 全部队列空且持续 6s 视为处理完毕
-            if eng.audio_q.empty() and eng.asr_q.empty() and eng.tr_q.empty():
+            if eng.audio_q.empty() and eng.tr_q.empty():
                 idle += 0.5
             else:
                 idle = 0

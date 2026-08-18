@@ -5,14 +5,16 @@ if (-not $root) { $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.M
 New-Item -ItemType Directory -Force -Path "$root\assets\fonts","$root\models\asr","$root\models\translate","$root\llama" | Out-Null
 
 function Get-WithMirror($Url, $Mirror, $Out) {
-  if (Test-Path $Out) { $sz=(Get-Item $Out).Length; if ($sz -gt 50) { Write-Output "SKIP $Out ($sz)"; return } }
   $ok = $false
   foreach ($u in @($Url, $Mirror)) {
     if (-not $u) { continue }
     Write-Output "DL $u"
-    curl.exe -sL --retry 3 --connect-timeout 20 --max-time 7200 -o $Out $u
-    if ((Test-Path $Out) -and ((Get-Item $Out).Length -gt 50)) { $ok = $true; Write-Output "OK $Out ($((Get-Item $Out).Length) bytes)"; break }
-    Remove-Item $Out -Force -ErrorAction SilentlyContinue
+    curl.exe -sL -C - --retry 3 --connect-timeout 20 --max-time 7200 -o $Out $u   # -C - 断点续传
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $Out) -and ((Get-Item $Out).Length -gt 50)) {
+      $ok = $true; Write-Output "OK $Out ($((Get-Item $Out).Length) bytes)"; break
+    }
+    # 失败只清掉垃圾小文件，半截文件保留供续传
+    if ((Test-Path $Out) -and ((Get-Item $Out).Length -le 50)) { Remove-Item $Out -Force -ErrorAction SilentlyContinue }
   }
   if (-not $ok) { Write-Output "FAIL $Out" }
 }
@@ -21,7 +23,7 @@ function Get-FontFromZip($ZipUrl, $Match, $Out) {
   if (Test-Path $Out) { Write-Output "SKIP $Out"; return }
   $zip = "$root\assets\fonts\_font_tmp.zip"
   $tmp = "$root\assets\fonts\_font_tmp"
-  curl.exe -sL --retry 3 --connect-timeout 20 --max-time 1800 -o $zip $ZipUrl
+  curl.exe -sL -C - --retry 3 --connect-timeout 20 --max-time 1800 -o $zip $ZipUrl   # -C - 断点续传
   if ((Test-Path $zip) -and ((Get-Item $zip).Length -gt 1000000)) {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
@@ -37,7 +39,7 @@ function Get-FontFromZip($ZipUrl, $Match, $Out) {
 function Get-AllWeights($ZipUrl, $Prefix, $Label) {
   $zip = "$root\assets\fonts\_full_tmp.zip"
   $tmp = "$root\assets\fonts\_full"
-  curl.exe -sL --retry 3 --connect-timeout 20 --max-time 3600 -o $zip $ZipUrl
+  curl.exe -sL -C - --retry 3 --connect-timeout 20 --max-time 3600 -o $zip $ZipUrl   # -C - 断点续传
   if ((Test-Path $zip) -and ((Get-Item $zip).Length -gt 1000000)) {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
@@ -71,7 +73,7 @@ if (-not (Test-Path "$root\llama\llama-server.exe")) {
   $asset = $rel.assets | Where-Object { $_.name -match '^llama-b[0-9]+-bin-win-cuda-12\.4-x64\.zip$' } | Select-Object -First 1
   if ($asset) {
     Write-Output "llama asset: $($asset.name)"
-    curl.exe -sL --retry 3 --max-time 7200 -o "$root\llama\llama.zip" $asset.browser_download_url
+    curl.exe -sL -C - --retry 3 --max-time 7200 -o "$root\llama\llama.zip" $asset.browser_download_url   # -C - 断点续传
     Expand-Archive -Path "$root\llama\llama.zip" -DestinationPath "$root\llama" -Force
     Remove-Item "$root\llama\llama.zip" -Force
   } else { Write-Output 'NO llama asset found' }

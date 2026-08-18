@@ -24,18 +24,23 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_env.ps1
 powershell -ExecutionPolicy Bypass -File scripts\download_assets.ps1
 ~~~
 
+## 卸载
+
+删除整个文件夹即可（配置、模型、缓存全部在文件夹内；不写注册表，无系统残留）。
+
 ## 使用
 
 - 双击 scripts\cli.bat：监听系统声音，实时输出日语识别 + 中文翻译（终端日志 + 屏幕悬浮窗）
+- 字幕显示：识别实时上屏，句末确认后定格，翻译完成整块（日文+中文）上屏
 - 托盘图标右键：显示/关闭字幕、穿透、退出
-- 悬浮窗右键菜单：大多数设置
+- 悬浮窗右键：条数/字号/字重/颜色/描边/边框/穿透；其他设置：句末确认（ms）、语音判定阈值
 
 ## 技术栈
 
 | 环节 | 组件 |
 |------|------|
 | 音频捕获 | WASAPI 环回（pyaudiowpatch） |
-| VAD | Silero VAD（阈值 0.5/静音 100ms/无补尾） |
+| 语音切分 | 滚动缓冲 + whisper 时间戳判定句末（无 VAD，跳过静音） |
 | 日语识别 | kotoba-whisper-v2.0-faster（CTranslate2 int8, CUDA） |
 | 日译中 | Sakura GalTransl-v4-4B-2601 Q6K（llama.cpp 本地服务） |
 | 显示 | 终端日志 + PySide6 悬浮窗（思源宋体 SC/JP） |
