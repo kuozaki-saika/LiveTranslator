@@ -358,7 +358,7 @@ class SubtitleOverlay(QWidget):
         a.triggered.connect(self.toggle_click_through)
         m.addSeparator()
         sub = m.addMenu('其他设置')
-        self._num_submenu(sub, '静音检测（ms）', 'min_silence_ms', 0, 999, 20)
+        self._num_submenu(sub, '静音检测（ms）', 'min_silence_ms', 1, 999, 20)   # 下限1ms：0会导致VAD不切段不出字
         self._double_submenu(sub, '语音判定阈值', 'no_speech_threshold', 0.00, 1.00, 0.05, invert=True)   # 界面 1-阈值：0=不判定（最松），1=最严
         a = sub.addAction('更改后重启生效')
         m.addSeparator()
