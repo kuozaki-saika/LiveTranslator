@@ -29,7 +29,6 @@ powershell -ExecutionPolicy Bypass -File scripts\download_assets.ps1
 - 双击 scripts\cli.bat：监听系统声音，实时输出日语识别 + 中文翻译（终端日志 + 屏幕悬浮窗）
 - 托盘图标右键：显示/关闭字幕、穿透、退出
 - 悬浮窗右键菜单：大多数设置
-- 测试模式：powershell -ExecutionPolicy Bypass -File scripts\run.ps1 --file 某音频.wav
 
 ## 技术栈
 
