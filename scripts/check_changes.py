@@ -168,6 +168,29 @@ def main():
     assert rows == [(first + half_gap + second, 'jp'),
                     (first + half_gap + second, 'zh')]
 
+    empty_first = TestOverlay(MemoryConfig(
+        blocks=1, width=1000, border_enabled=False))
+    empty_first.complete_pending('お', '')
+    empty_first.complete_pending('次。', '下一句。')
+    rows = [(text, lang) for _, text, lang, _ in empty_first._layout()[0]]
+    assert rows == [('お' + half_gap + '次。', 'jp'),
+                    ('下一句。', 'zh')]
+
+    empty_second = TestOverlay(MemoryConfig(
+        blocks=1, width=1000, border_enabled=False))
+    empty_second.complete_pending('前。', '前句。')
+    empty_second.complete_pending('お', '')
+    rows = [(text, lang) for _, text, lang, _ in empty_second._layout()[0]]
+    assert rows == [('前。' + half_gap + 'お', 'jp'),
+                    ('前句。', 'zh')]
+
+    both_empty = TestOverlay(MemoryConfig(
+        blocks=1, width=1000, border_enabled=False))
+    both_empty.complete_pending('一', '')
+    both_empty.complete_pending('二', '')
+    rows = [(text, lang) for _, text, lang, _ in both_empty._layout()[0]]
+    assert rows == [('一' + half_gap + '二', 'jp')]
+
     either_full = TestOverlay(MemoryConfig(
         blocks=2, width=1000, border_enabled=False))
     jp1, jp2 = '一。', '二。'

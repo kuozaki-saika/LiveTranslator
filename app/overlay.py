@@ -124,12 +124,13 @@ class SubtitleOverlay(QWidget):
         zh_fm = QFontMetrics(self.font_for('zh', int(self.cfg['zh_size'])))
         packed = []
         for jp, zh in self.blocks:
-            if packed and packed[-1][1] and zh:
+            if packed:
                 old_jp, old_zh = packed[-1]
                 joined_jp = old_jp + SENTENCE_GAP + jp
-                joined_zh = old_zh + SENTENCE_GAP + zh
+                joined_zh = old_zh + (SENTENCE_GAP if old_zh and zh else '') + zh
                 if (jp_fm.horizontalAdvance(joined_jp) <= width
-                        and zh_fm.horizontalAdvance(joined_zh) <= width):
+                        and (not joined_zh
+                             or zh_fm.horizontalAdvance(joined_zh) <= width)):
                     packed[-1] = (joined_jp, joined_zh)
                     continue
             packed.append((jp, zh))
