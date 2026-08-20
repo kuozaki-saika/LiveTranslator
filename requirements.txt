@@ -1,6 +1,5 @@
+av
 faster-whisper
+numpy
 PySide6
 pyaudiowpatch
-silero-vad
-onnxruntime
-numpy

@@ -19,22 +19,6 @@ function Get-WithMirror($Url, $Mirror, $Out) {
   if (-not $ok) { Write-Output "FAIL $Out" }
 }
 
-function Get-FontFromZip($ZipUrl, $Match, $Out) {
-  if (Test-Path $Out) { Write-Output "SKIP $Out"; return }
-  $zip = "$root\assets\fonts\_font_tmp.zip"
-  $tmp = "$root\assets\fonts\_font_tmp"
-  curl.exe -sL -C - --retry 3 --connect-timeout 20 --max-time 1800 -o $zip $ZipUrl   # -C - 断点续传
-  if ((Test-Path $zip) -and ((Get-Item $zip).Length -gt 1000000)) {
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    Expand-Archive -Path $zip -DestinationPath $tmp -Force
-    $otf = Get-ChildItem $tmp -Recurse -Filter '*.otf' | Where-Object { $_.Name -match $Match } | Select-Object -First 1
-    if ($otf) { Copy-Item $otf.FullName $Out -Force; Write-Output "OK $Out ($((Get-Item $Out).Length) bytes)" }
-    else { Write-Output "FAIL $Out (zip 内未找到)" }
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  } else { Write-Output "FAIL $Out (zip 下载失败)" }
-  Remove-Item $zip -Force -ErrorAction SilentlyContinue
-}
-
 # 1) fonts（官方 zip 解出用得到的字重）
 function Get-AllWeights($ZipUrl, $Prefix, $Label) {
   $zip = "$root\assets\fonts\_full_tmp.zip"

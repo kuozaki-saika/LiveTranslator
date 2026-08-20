@@ -1,12 +1,15 @@
-import os
+import os, re
 from PySide6.QtWidgets import (QApplication, QWidget, QMenu,
                                QSystemTrayIcon)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import (QPainter, QPen, QColor, QPainterPath, QFont,
-                           QFontMetrics, QFontDatabase, QPixmap, QIcon)
+                           QFontMetrics, QFontDatabase, QPixmap, QIcon,
+                           QTextLayout, QTextOption)
 from config import Config, resource_path
 
 MARGIN = 0    # 文字内边距：不额外留（描边空间由窗口外扩提供）
+BORDER_GAP = 3
+SENTENCE_GAP = '\u2002'
 
 ICON_PATH = 'assets/icon.png'   # 随包图标（御莉姫）
 
@@ -18,18 +21,18 @@ class SubtitleOverlay(QWidget):
         super().__init__()
         self.cfg = cfg
         self.blocks = []          # [(jp, zh), ...]，新的在末尾（显示在最下方）
-        self.pending = ''         # 正在识别的日文（实时上屏；完成后定格，等翻译整块上屏）
-        self._held = False        # 完成句是否在等待翻译（期间新识别文本暂存）
-        self._stash = ''         # 等待翻译期间到达的新识别文本
+        self._live = ''           # 当前仍在识别的日文
+        self._waiting = []        # 已确认、正在按顺序等待翻译的日文
         self._drag_pos = None
         self._fonts = {}
+        self._layout_cache = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
         self.load_fonts()
         self.setWindowIcon(self.load_app_icon())
-        self.resize(int(cfg['width']), 100)   # 初始高度，add_block 后自动贴合
+        self.resize(self._window_width(), self._minimum_height())
         self.move(int(cfg['x']), int(cfg['y']))
         self.apply_click_through()
         self.setup_tray()
@@ -39,14 +42,10 @@ class SubtitleOverlay(QWidget):
     ZH_FAMILY = 'Source Han Serif SC'
 
     def load_fonts(self):
-        """注册随程序打包的全部字体字重（思源宋体 SC/JP 各 7 档）"""
+        """注册随程序打包的全部字体字重（思源宋体 SC/JP 各 5 档）"""
         import glob
         for p in glob.glob(os.path.join(resource_path(os.path.join('assets', 'fonts')), '*.otf')):
             QFontDatabase.addApplicationFont(p)
-
-    def _margin(self):
-        """文字位置固定贴边（0）；描边空间由窗口向外扩提供"""
-        return MARGIN
 
     def font_for(self, lang, size):
         key = (lang, size, self.cfg['font_weight'])
@@ -61,61 +60,109 @@ class SubtitleOverlay(QWidget):
     # ---------- 数据 ----------
     def add_block(self, jp, zh):
         self.blocks.append((jp, zh))
-        if len(self.blocks) > self.cfg['blocks']:
-            self.blocks = self.blocks[-self.cfg['blocks']:]
-        self.update()
+        self._trim_blocks()
         self.resize_to_fit()
+        self.update()
 
     def update_pending(self, jp):
-        """识别实时上屏：更新正在识别的日文行；等待翻译期间新文本暂存"""
-        if self._held:
-            self._stash = jp
-            return
-        if jp != self.pending:
-            self.pending = jp
-            self.update()
+        """保存实时识别；有完整句等待翻译时暂不上屏。"""
+        if jp != self._live:
+            self._live = jp
+            if self._waiting:
+                return
             self.resize_to_fit()
+            self.update()
 
     def finalize_pending(self, jp):
-        """句子完成：实时行定格此句，等翻译到达后整块（日文+译文）上屏"""
-        self._held = True
-        if jp and jp != self.pending:
-            self.pending = jp
-            self.update()
+        """完整句按顺序等待翻译；屏幕只显示最早的一句。"""
+        self._live = ''
+        if jp:
+            self._waiting.append(jp)
+        if len(self._waiting) == 1:
             self.resize_to_fit()
+            self.update()
 
     def complete_pending(self, jp, zh):
-        """翻译完成：整块上屏，实时行切换到暂存的新文本"""
+        """翻译完成：加入正式字幕，再显示下一句或最新实时识别。"""
+        if self._waiting and self._waiting[0] == jp:
+            self._waiting.pop(0)
+        elif jp in self._waiting:
+            self._waiting.remove(jp)
         self.add_block(jp, zh)
-        self._held = False
-        nxt = self._stash
-        self._stash = ''
-        if nxt != self.pending:
-            self.pending = nxt
-            self.update()
-            self.resize_to_fit()
 
     def clear(self):
         self.blocks.clear()
-        self.pending = ''
-        self._held = False
-        self._stash = ''
+        self._live = ''
+        self._waiting.clear()
+        self.resize_to_fit()
         self.update()
 
     # ---------- 排版与绘制 ----------
+    def _pending_text(self):
+        return self._waiting[0] if self._waiting else self._live
+
+    def _stroke_padding(self):
+        if not self.cfg['stroke_enabled']:
+            return 0
+        return (int(self.cfg['stroke_width']) + 1) // 2 + 1
+
+    def _border_padding(self):
+        if not self.cfg['border_enabled'] or int(self.cfg['border_width']) <= 0:
+            return 0
+        return BORDER_GAP + int(self.cfg['border_width'])
+
+    def _window_width(self):
+        return int(self.cfg['width']) + 2 * self._border_padding()
+
+    def _text_width(self):
+        return max(1, int(self.cfg['width'])
+                   - 2 * (MARGIN + self._stroke_padding()))
+
+    def _packed_blocks(self):
+        width = self._text_width()
+        jp_fm = QFontMetrics(self.font_for('jp', int(self.cfg['jp_size'])))
+        zh_fm = QFontMetrics(self.font_for('zh', int(self.cfg['zh_size'])))
+        packed = []
+        for jp, zh in self.blocks:
+            if packed and packed[-1][1] and zh:
+                old_jp, old_zh = packed[-1]
+                joined_jp = old_jp + SENTENCE_GAP + jp
+                joined_zh = old_zh + SENTENCE_GAP + zh
+                if (jp_fm.horizontalAdvance(joined_jp) <= width
+                        and zh_fm.horizontalAdvance(joined_zh) <= width):
+                    packed[-1] = (joined_jp, joined_zh)
+                    continue
+            packed.append((jp, zh))
+        return packed
+
+    def _trim_blocks(self):
+        limit = max(1, int(self.cfg['blocks']))
+        while len(self.blocks) > 1 and len(self._packed_blocks()) > limit:
+            self.blocks.pop(0)
+
+    def _minimum_height(self):
+        jp = QFontMetrics(self.font_for('jp', int(self.cfg['jp_size'])))
+        zh = QFontMetrics(self.font_for('zh', int(self.cfg['zh_size'])))
+        return int(jp.height() + zh.height() - zh.leading()
+                   + 2 * (MARGIN + self._stroke_padding()
+                          + self._border_padding()))
+
     def _layout(self):
         jp_size = int(self.cfg['jp_size'])
         zh_size = int(self.cfg['zh_size'])
-        sw = int(self.cfg['stroke_width'])
-        w = self.width() - 2 * (self._margin() + sw)   # 左右给描边留空间
-        y = self._margin()
+        sw = self._stroke_padding()
+        border = self._border_padding()
+        pending = self._pending_text()
+        key = (self.width(), int(self.cfg['width']), tuple(self.blocks), pending,
+               jp_size, zh_size, int(self.cfg['font_weight']), sw, border)
+        if self._layout_cache and self._layout_cache[0] == key:
+            return self._layout_cache[1]
+        w = self._text_width()
+        y = border + MARGIN
         rows = []   # (y, text, lang, size)：每行精确起始坐标
-        n = len(self.blocks)
-        for idx, (jp, zh) in enumerate(self.blocks):
-            jp_f = self.font_for('jp', jp_size)
-            zh_f = self.font_for('zh', zh_size)
-            jp_h = QFontMetrics(jp_f).height()
-            zh_h = QFontMetrics(zh_f).height()
+        jp_h = QFontMetrics(self.font_for('jp', jp_size)).height()
+        zh_h = QFontMetrics(self.font_for('zh', zh_size)).height()
+        for jp, zh in self._packed_blocks():
             for ln in self.wrap_lines(jp, 'jp', jp_size, w):
                 rows.append((y, ln, 'jp', jp_size))
                 y += jp_h
@@ -124,10 +171,8 @@ class SubtitleOverlay(QWidget):
                     rows.append((y, ln, 'zh', zh_size))
                     y += zh_h
         # 实时识别行（未翻译的日文，显示在最下方）
-        if self.pending:
-            jp_f = self.font_for('jp', jp_size)
-            jp_h = QFontMetrics(jp_f).height()
-            for ln in self.wrap_lines(self.pending, 'jp', jp_size, w):
+        if pending:
+            for ln in self.wrap_lines(pending, 'jp', jp_size, w):
                 rows.append((y, ln, 'jp', jp_size))
                 y += jp_h
         # 最后一行高度去掉 leading（字形底部即行底，不留额外空隙）
@@ -135,30 +180,55 @@ class SubtitleOverlay(QWidget):
             lf = self.font_for(rows[-1][2], rows[-1][3])
             fm = QFontMetrics(lf)
             leading = fm.height() - (fm.ascent() + fm.descent())
-            total = y - leading + self._margin() + 2 * sw
+            total = y - leading + MARGIN + 2 * sw + border
         else:
-            total = self._margin() * 2 + 2 * sw
-        return rows, total
+            total = 2 * (border + MARGIN + sw)
+        result = (rows, total)
+        self._layout_cache = (key, result)
+        return result
 
     def resize_to_fit(self):
         _, total = self._layout()
-        h = max(int(total), 60)   # 空窗口最小高度
+        h = max(int(total), self._minimum_height())
         if h != self.height():
             self.setFixedHeight(h)
+
     def wrap_lines(self, text, lang, size, max_w):
-        fm = QFontMetrics(self.font_for(lang, size))
-        lines, cur = [], ''
-        for ch in text:
-            if ch == '\n':
-                lines.append(cur); cur = ''
+        font = self.font_for(lang, size)
+        fm = QFontMetrics(font)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapAnywhere)
+        sentences = []
+        for part in text.replace('\r', '').replace('\n', '').split(SENTENCE_GAP):
+            sentences.extend(re.findall(
+                r'.*?[。！？!?…]+[」』”’）】》〉]*|.+$', part))
+        if not sentences:
+            return []
+        lines, current = [], ''
+        for sentence in sentences:
+            candidate = current + (SENTENCE_GAP if current else '') + sentence
+            if fm.horizontalAdvance(candidate) <= max_w:
+                current = candidate
                 continue
-            if cur and fm.horizontalAdvance(cur + ch) > max_w:
-                lines.append(cur); cur = ch
-            else:
-                cur += ch
-        if cur:
-            lines.append(cur)
-        return lines or ['']
+            if current:
+                lines.append(current)
+            layout = QTextLayout(sentence, font)
+            layout.setTextOption(option)
+            wrapped = []
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1, max_w))
+                start = line.textStart()
+                wrapped.append(sentence[start:start + line.textLength()])
+            layout.endLayout()
+            lines.extend(wrapped[:-1])
+            current = wrapped[-1]
+        if current:
+            lines.append(current)
+        return lines
 
     def draw_line(self, p, text, lang, size, fcolor, scolor, sw, x, y):
         f = self.font_for(lang, size)
@@ -195,13 +265,15 @@ class SubtitleOverlay(QWidget):
             y = offset + ly
             self.draw_line(p, text, lang, size, fcolor, scolor, sw, x, y)
 
-        # 边框（直角正方形，可开关/调色/调粗）
+        # 边框内缘距字幕区固定 3px，加粗部分全部向窗口外侧增长
         if self.cfg['border_enabled'] and int(self.cfg['border_width']) > 0:
             bw = int(self.cfg['border_width'])
-            ins = 2 + bw // 2          # 边框内缩量：基础2px + 半粗度（不贴边）
             p.setPen(QPen(QColor(self.cfg['border_color']), bw, Qt.SolidLine))
             p.setBrush(Qt.NoBrush)
-            p.drawRect(ins, ins, self.width() - 2 * ins - 1, self.height() - 2 * ins - 1)
+            half = bw / 2.0
+            p.drawRect(QRectF(half, half,
+                              self.width() - bw - 1,
+                              self.height() - bw - 1))
 
     # ---------- 交互 ----------
     def mousePressEvent(self, e):
@@ -236,17 +308,33 @@ class SubtitleOverlay(QWidget):
     def set_cfg(self, key, value):
         self.cfg[key] = value
         if key == 'width':
-            self.resize(int(value), self.height())
-        elif key in ('blocks', 'jp_size', 'zh_size', 'font_weight', 'stroke_width', 'border_width'):
+            self.resize(self._window_width(), self.height())
+            self._trim_blocks()
+            self.resize_to_fit()
+        elif key == 'border_width':
+            self._resize_for_border()
+        elif key in ('blocks', 'jp_size', 'zh_size', 'font_weight', 'stroke_width'):
+            self._trim_blocks()
             self.resize_to_fit()
         self.update()
 
+    def _resize_for_border(self):
+        center_x = self.x() + self.width() / 2
+        center_y = self.y() + self.height() / 2
+        self.resize(self._window_width(), self.height())
+        self.resize_to_fit()
+        self.move(round(center_x - self.width() / 2),
+                  round(center_y - self.height() / 2))
+
     def toggle_border(self):
         self.cfg['border_enabled'] = not self.cfg['border_enabled']
+        self._resize_for_border()
         self.update()
 
     def toggle_stroke(self):
         self.cfg['stroke_enabled'] = not self.cfg['stroke_enabled']
+        self._trim_blocks()
+        self.resize_to_fit()
         self.update()
 
     @staticmethod
@@ -287,31 +375,11 @@ class SubtitleOverlay(QWidget):
         wa.setDefaultWidget(cb)
         sub.addAction(wa)
 
-    def _double_submenu(self, menu, title, key, lo, hi, step, invert=False):
-        """小数数值项：右侧展开子菜单，内嵌 QDoubleSpinBox；invert 时界面值 = 1 - 存储值"""
-        from PySide6.QtWidgets import QWidgetAction, QDoubleSpinBox
-        sub = menu.addMenu(title)
-        wa = QWidgetAction(sub)
-        sb = QDoubleSpinBox()
-        sb.setRange(lo, hi)
-        sb.setSingleStep(step)
-        sb.setDecimals(2)
-        sb.setValue(1.0 - float(self.cfg[key]) if invert else float(self.cfg[key]))
-        sb.setFixedWidth(self._spin_width_for(999))   # 三位数字宽度（0.50 完整显示）
-        if invert:
-            sb.valueChanged.connect(lambda v: self.set_cfg(key, round(1.0 - v, 2)))
-        else:
-            sb.valueChanged.connect(lambda v: self.set_cfg(key, v))
-        wa.setDefaultWidget(sb)
-        sub.addAction(wa)
-
     def _bw_color_submenu(self, menu, title, key):
         """颜色：右侧展开白/黑色块 + 自定义▶（内嵌 R/G/B 输入框，不弹框）"""
-        from PySide6.QtWidgets import (QWidgetAction, QSpinBox, QLabel,
-                                       QHBoxLayout, QWidget)
         sub = menu.addMenu(title)
-        for name, hexv, edge in (('白色', '#FFFFFF', '#888888'),
-                                 ('黑色', '#000000', '#FFFFFF')):
+        for hexv, edge in (('#FFFFFF', '#888888'),
+                           ('#000000', '#FFFFFF')):
             pix = QPixmap(16, 16)
             pix.fill(QColor(hexv))
             p = QPainter(pix)
@@ -379,9 +447,8 @@ class SubtitleOverlay(QWidget):
         a.triggered.connect(self.toggle_click_through)
         m.addSeparator()
         sub = m.addMenu('其他设置')
-        self._num_submenu(sub, '句末确认（ms）', 'min_silence_ms', 0, 999, 20)   # 说完后再等这么多确认结束
-        self._double_submenu(sub, '语音判定阈值', 'no_speech_threshold', 0.00, 1.00, 0.05, invert=True)   # 界面 1-阈值：0=不判定（最松），1=最严
-        a = sub.addAction('（更改后重启生效）')
+        self._num_submenu(sub, '句末缓冲（ms）', 'min_silence_ms', 0, 999, 20)   # 说完后再等这么多确认结束
+        sub.addAction('（更改后重启生效）')
         m.addSeparator()
         a = m.addAction('清空字幕')
         a.triggered.connect(self.clear)
@@ -390,8 +457,8 @@ class SubtitleOverlay(QWidget):
     # ---------- Windows 命中测试（防透明区域穿透） ----------
     def nativeEvent(self, eventType, message):
         try:
-            import ctypes
-            msg = ctypes.wintypes.MSG.from_address(int(message))
+            from ctypes import wintypes
+            msg = wintypes.MSG.from_address(int(message))
             if msg.message == 0x0084:      # WM_NCHITTEST
                 return True, 1             # HTCLIENT：整窗可命中
         except Exception:

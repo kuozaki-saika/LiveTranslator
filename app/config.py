@@ -14,19 +14,17 @@ DEFAULTS = {
     'zh_size': 20,          # 中文字号
     'font_color': '#FFFFFF',
     'stroke_color': '#000000',
-    'stroke_width': 2,
+    'stroke_width': 3,
     'font_weight': 900,        # 字重（可选 400/500/600/700/900，思源宋体静态字重）
     'stroke_enabled': True,      # 描边开关
-    'border_enabled': True,      # 边框开关
+    'border_enabled': False,      # 边框开关
     'border_color': '#000000',   # 边框颜色
     'border_width': 1,           # 边框粗度
     'click_through': False,      # 点击穿透（默认关，右键可操作）
-    'min_silence_ms': 100,       # 句末确认（ms）：说完后再等这么久确认结束
-    'no_speech_threshold': 0.5,  # 语音判定阈值（菜单按 1-阈值 显示：0=不判定，1=最严；0.0 会误滤真实语音）
-    'x': 0, 'y': 860,   # 贴屏幕底部（任务栏上方）
-    'width': 1700,
+    'min_silence_ms': 200,       # 句末缓冲（ms）：说完后再等这么久确认结束
+    'x': 596, 'y': 690,
+    'width': 600,
     'llm_port': 11435,
-    'llm_url': None,  # 自动 = http://127.0.0.1:{port}/v1/chat/completions
 }
 
 class Config:

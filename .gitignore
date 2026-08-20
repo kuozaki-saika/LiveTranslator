@@ -7,6 +7,7 @@ __pycache__/
 config.json
 llama-server.log
 llama.zip
+.cache/
 
 # 模型（太大，不入库，由 download_assets.ps1 下载）
 models/

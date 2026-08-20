@@ -11,6 +11,6 @@ if (-not (Test-Path "$root\venv\Scripts\python.exe")) {
   Invoke-Expression "$py -m venv `"$root\venv`""
 }
 & "$root\venv\Scripts\python.exe" -m pip install --upgrade pip -q
-& "$root\venv\Scripts\python.exe" -m pip install -q --timeout 120 faster-whisper PySide6 pyaudiowpatch silero-vad onnxruntime numpy
+& "$root\venv\Scripts\python.exe" -m pip install -q --timeout 120 -r "$root\requirements.txt"
 Write-Output 'ENV DONE'
-& "$root\venv\Scripts\python.exe" -c "import faster_whisper, PySide6, silero_vad, pyaudiowpatch; print('IMPORTS OK')"
+& "$root\venv\Scripts\python.exe" -c "import av, faster_whisper, numpy, PySide6, pyaudiowpatch; print('IMPORTS OK')"

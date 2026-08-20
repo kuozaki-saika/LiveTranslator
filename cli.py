@@ -6,12 +6,16 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 
 # HF 缓存放入程序目录（.cache）：卸载 = 删除文件夹，不在用户目录留残留
 _base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) \
     else os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault('HF_HOME', os.path.join(_base, '.cache'))
+_qt_rules = os.environ.get('QT_LOGGING_RULES', '')
+os.environ['QT_LOGGING_RULES'] = ';'.join(
+    rule for rule in (_qt_rules, 'qt.multimedia.ffmpeg=false') if rule)
 
 
 def setup_console():
@@ -27,10 +31,39 @@ def setup_console():
         pass
 
 
+class Printer:
+    def __init__(self, lock):
+        self.lock = lock
+        self.live = False
+        self.text = ''
+
+    def _replace(self, text, end=''):
+        print('\r' + ' ' * (len(self.text) * 2) + '\r' + text,
+              end=end, flush=True)
+        self.text = '' if end else text
+
+    def recog(self, jp):
+        with self.lock:
+            if not self.live and jp:
+                print('', flush=True)
+            self._replace(jp)
+            self.live = bool(jp)
+
+    def final(self, jp):
+        with self.lock:
+            if not self.live:
+                print('', flush=True)
+            self._replace(jp, '\n')
+            self.live = False
+
+    def result(self, zh, meta):
+        with self.lock:
+            print('（%.2fs）%s' % (meta.get('tr_s', 0.0), zh), flush=True)
+
+
 def main():
     setup_console()
     parser = argparse.ArgumentParser(description='日文直播实时字幕：命令行日志 + 屏幕悬浮窗')
-    parser.add_argument('--file', help='读取音频文件代替系统声音（测试用，仅命令行日志）')
     parser.add_argument('--no-overlay', action='store_true', help='不显示屏幕悬浮窗，仅命令行日志')
     args = parser.parse_args()
 
@@ -46,7 +79,7 @@ def main():
     bridge = None
     app = None
 
-    if not args.file and not args.no_overlay:
+    if not args.no_overlay:
         from PySide6.QtWidgets import QApplication
         from PySide6.QtCore import QObject, Signal, QTimer
         from overlay import SubtitleOverlay
@@ -71,41 +104,18 @@ def main():
         keep.start(100)
 
     # ---------- 命令行日志 ----------
-    import threading
     out_lock = threading.Lock()
 
     # 终端输出：日文实时更新行（\r 原地刷新），整句翻译完成后输出中文
-    class Printer:
-        def __init__(self):
-            self.live = False      # 当前行是否处于实时更新状态
-
-        def recog(self, jp, meta):
-            with out_lock:
-                if not self.live:
-                    print('', flush=True)              # 组前空行
-                print('\r' + jp, end='', flush=True)   # 原地更新识别行
-                self.live = True
-
-        def final(self, jp):
-            with out_lock:
-                print('', flush=True)                  # 结束实时行
-                if not self.live:
-                    print(jp, flush=True)              # 之前没显示过：补打
-                self.live = False
-
-        def result(self, zh, meta):
-            with out_lock:
-                print('（%.2fs）%s' % (meta.get('tr_s', 0.0), zh), flush=True)   # 翻译本身用时
-
-    printer = Printer()
+    printer = Printer(out_lock)
 
     def on_asr(jp, meta=None):
         meta = meta or {}
         if meta.get('final'):
             if jp:
                 printer.final(jp)     # 完成句：定格当前行
-        elif jp:
-            printer.recog(jp, meta)   # 尾部：实时更新
+        else:
+            printer.recog(jp)         # 尾部：实时更新或清空
         if bridge is not None:
             (bridge.final if meta.get('final') else bridge.pending).emit(jp)
 
@@ -118,39 +128,19 @@ def main():
     def on_status(s):
         print('[状态] ' + s, flush=True)
 
-    eng = LiveEngine(cfg, on_result, on_status, capture=(args.file is None),
-                     on_asr=on_asr)
+    eng = LiveEngine(cfg, on_result, on_status, capture=True, on_asr=on_asr)
 
     # ---------- 启动 ----------
-    if args.file:
-        eng.start()
-        import av
-        import numpy as np
-        container = av.open(args.file)
-        frames = []
-        for f in container.decode(audio=0):
-            frames.append(f.to_ndarray().ravel())
-        audio = np.concatenate(frames).astype(np.float32) / 32768.0
-        for i in range(0, len(audio), 16000):
-            eng.audio_q.put((audio[i:i + 16000], 16000, 1))
-        idle = 0
-        while idle < 12:   # 全部队列空且持续 6s 视为处理完毕
-            if eng.audio_q.empty() and eng.tr_q.empty():
-                idle += 0.5
-            else:
-                idle = 0
-            time.sleep(0.5)
-        eng.stop()
-        eng.join(timeout=8)
-        print('处理完毕，退出。', flush=True)
-        return
-
     print('正在监听系统声音…（托盘图标右键退出）', flush=True)
 
     if app is not None:
+        from PySide6.QtMultimedia import QMediaDevices
+
         def _on_sigint(s, f):
             eng.stop()
             app.quit()
+        media_devices = QMediaDevices()
+        media_devices.audioOutputsChanged.connect(eng.request_capture_restart)
         signal.signal(signal.SIGINT, _on_sigint)
         app.aboutToQuit.connect(lambda: eng.stop())
         eng.start()
